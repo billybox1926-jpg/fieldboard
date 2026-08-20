@@ -2,6 +2,10 @@
 
 **Terminal dashboard for running local repo quality tools.**
 
+[![CI](https://github.com/billybox1926-jpg/fieldboard/actions/workflows/ci.yml/badge.svg)](https://github.com/billybox1926-jpg/fieldboard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+
 Run multiple quality tools as subprocesses, capture results, and display a clean terminal dashboard or JSON report.
 
 ## The Problem
