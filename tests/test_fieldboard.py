@@ -60,6 +60,17 @@ class TestLoadConfig(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_load_config_with_explicit_path(self):
+        """Test loading config with explicit path."""
+        fd, path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"custom": "value"}, f)
+            config = fieldboard.load_config(path)
+            self.assertEqual(config["custom"], "value")
+        finally:
+            os.unlink(path)
+
 
 class TestGetDefaultConfig(unittest.TestCase):
     """Test default config generation."""
@@ -80,6 +91,16 @@ class TestGetDefaultConfig(unittest.TestCase):
             self.assertIn("command", tool)
             self.assertIn("args", tool)
             self.assertIn("enabled", tool)
+
+    def test_default_config_has_5_tools(self):
+        """Test default config has 5 tools."""
+        config = fieldboard.get_default_config()
+        self.assertEqual(len(config["tools"]), 5)
+
+    def test_default_config_timeout(self):
+        """Test default timeout is 120 seconds."""
+        config = fieldboard.get_default_config()
+        self.assertEqual(config["timeout_seconds"], 120)
 
 
 class TestRunTool(unittest.TestCase):
@@ -175,6 +196,43 @@ class TestRunTool(unittest.TestCase):
             result = fieldboard.run_tool(tool, tmpdir, 10, verbose=True)
             self.assertIn("error msg", result["output"])
 
+    def test_run_tool_oserror(self):
+        """Test OSError handling."""
+        tool = {
+            "name": "test-tool",
+            "command": "python",
+            "args": [],
+            "enabled": True,
+        }
+        with patch("subprocess.run", side_effect=OSError("permission denied")):
+            result = fieldboard.run_tool(tool, ".", 10)
+            self.assertEqual(result["status"], "fail")
+            self.assertIn("permission denied", result["error"])
+
+    def test_run_tool_duration_tracked(self):
+        """Test that duration is tracked."""
+        tool = {
+            "name": "test-tool",
+            "command": "python",
+            "args": ["-c", "pass"],
+            "enabled": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = fieldboard.run_tool(tool, tmpdir, 10)
+            self.assertGreaterEqual(result["duration_ms"], 0)
+
+    def test_run_tool_stderr_captured(self):
+        """Test that stderr is captured on failure."""
+        tool = {
+            "name": "test-tool",
+            "command": "python",
+            "args": ["-c", "import sys; sys.stderr.write('err'); sys.exit(1)"],
+            "enabled": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = fieldboard.run_tool(tool, tmpdir, 10)
+            self.assertIn("err", result["error"])
+
 
 class TestFormatTerminal(unittest.TestCase):
     """Test terminal output formatting."""
@@ -257,6 +315,110 @@ class TestFormatTerminal(unittest.TestCase):
         )
         self.assertIn("some output", output)
 
+    def test_format_terminal_with_color(self):
+        """Test color mode includes ANSI codes."""
+        results = [
+            {
+                "name": "tool1",
+                "status": "pass",
+                "duration_ms": 100,
+                "output": "",
+                "error": "",
+            },
+        ]
+        output = fieldboard.format_terminal(results, "/repo", no_color=False)
+        self.assertIn("\033[", output)
+
+    def test_format_terminal_all_pass(self):
+        """Test terminal output when all tools pass."""
+        results = [
+            {
+                "name": "t1",
+                "status": "pass",
+                "duration_ms": 100,
+                "output": "",
+                "error": "",
+            },
+            {
+                "name": "t2",
+                "status": "pass",
+                "duration_ms": 200,
+                "output": "",
+                "error": "",
+            },
+        ]
+        output = fieldboard.format_terminal(results, "/repo", no_color=True)
+        self.assertIn("2 passed, 0 failed, 0 skipped", output)
+
+    def test_format_terminal_all_fail(self):
+        """Test terminal output when all tools fail."""
+        results = [
+            {
+                "name": "t1",
+                "status": "fail",
+                "duration_ms": 100,
+                "output": "",
+                "error": "err1",
+            },
+            {
+                "name": "t2",
+                "status": "fail",
+                "duration_ms": 200,
+                "output": "",
+                "error": "err2",
+            },
+        ]
+        output = fieldboard.format_terminal(results, "/repo", no_color=True)
+        self.assertIn("0 passed, 2 failed, 0 skipped", output)
+
+    def test_format_terminal_empty_results(self):
+        """Test terminal output with no results."""
+        output = fieldboard.format_terminal([], "/repo", no_color=True)
+        self.assertIn("FIELD BOARD", output)
+        self.assertIn("0 passed, 0 failed, 0 skipped", output)
+
+    def test_format_terminal_shows_error_detail(self):
+        """Test that error detail is shown for failed tools."""
+        results = [
+            {
+                "name": "tool1",
+                "status": "fail",
+                "duration_ms": 100,
+                "output": "",
+                "error": "something went wrong",
+            },
+        ]
+        output = fieldboard.format_terminal(results, "/repo", no_color=True)
+        self.assertIn("something went wrong", output)
+
+    def test_format_terminal_skipped_detail(self):
+        """Test that skipped reason is shown."""
+        results = [
+            {
+                "name": "tool1",
+                "status": "skipped",
+                "duration_ms": 0,
+                "output": "",
+                "error": "not found on PATH",
+            },
+        ]
+        output = fieldboard.format_terminal(results, "/repo", no_color=True)
+        self.assertIn("not found on PATH", output)
+
+    def test_format_terminal_duration_dash_for_zero(self):
+        """Test that zero duration shows as dash."""
+        results = [
+            {
+                "name": "tool1",
+                "status": "skipped",
+                "duration_ms": 0,
+                "output": "",
+                "error": "",
+            },
+        ]
+        output = fieldboard.format_terminal(results, "/repo", no_color=True)
+        self.assertIn("─", output)
+
 
 class TestFormatJson(unittest.TestCase):
     """Test JSON output formatting."""
@@ -296,6 +458,50 @@ class TestFormatJson(unittest.TestCase):
         output = fieldboard.format_json([], "/repo", 0)
         parsed = json.loads(output)
         self.assertEqual(parsed["summary"]["total"], 0)
+
+    def test_format_json_all_pass(self):
+        """Test JSON output when all tools pass."""
+        results = [
+            {
+                "name": "t1",
+                "status": "pass",
+                "exit_code": 0,
+                "duration_ms": 100,
+                "output": "",
+                "error": "",
+            },
+        ]
+        output = fieldboard.format_json(results, "/repo", 0)
+        parsed = json.loads(output)
+        self.assertEqual(parsed["summary"]["passed"], 1)
+        self.assertEqual(parsed["summary"]["failed"], 0)
+        self.assertEqual(parsed["exit_code"], 0)
+
+    def test_format_json_includes_all_tools(self):
+        """Test JSON output includes all tool results."""
+        results = [
+            {
+                "name": "t1",
+                "status": "pass",
+                "exit_code": 0,
+                "duration_ms": 100,
+                "output": "out",
+                "error": "err",
+            },
+            {
+                "name": "t2",
+                "status": "fail",
+                "exit_code": 1,
+                "duration_ms": 200,
+                "output": "",
+                "error": "fail err",
+            },
+        ]
+        output = fieldboard.format_json(results, "/repo", 1)
+        parsed = json.loads(output)
+        self.assertEqual(len(parsed["tools"]), 2)
+        self.assertEqual(parsed["tools"][0]["name"], "t1")
+        self.assertEqual(parsed["tools"][1]["name"], "t2")
 
 
 class TestRunCommand(unittest.TestCase):
@@ -442,6 +648,147 @@ class TestRunCommand(unittest.TestCase):
             exit_code = fieldboard.run_command(args)
             self.assertEqual(exit_code, 1)
 
+    def test_run_command_json_output(self):
+        """Test run command with JSON output."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool_path = Path(tmpdir) / "tool.py"
+            tool_path.write_text("#!/usr/bin/env python\nprint('ok')\n")
+
+            config = {
+                "repo": tmpdir,
+                "timeout_seconds": 10,
+                "tools": [
+                    {
+                        "name": "tool1",
+                        "command": "python",
+                        "args": [str(tool_path)],
+                        "enabled": True,
+                    }
+                ],
+            }
+            config_path = Path(tmpdir) / "fieldboard.json"
+            config_path.write_text(json.dumps(config))
+
+            args = argparse.Namespace(
+                config=str(config_path),
+                repo=tmpdir,
+                tool=None,
+                json=True,
+                no_color=True,
+                fail_fast=False,
+                timeout=10,
+                verbose=False,
+            )
+            exit_code = fieldboard.run_command(args)
+            self.assertEqual(exit_code, 0)
+
+    def test_run_command_no_tools(self):
+        """Test run command with no tools to run."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "repo": tmpdir,
+                "timeout_seconds": 10,
+                "tools": [],
+            }
+            config_path = Path(tmpdir) / "fieldboard.json"
+            config_path.write_text(json.dumps(config))
+
+            args = argparse.Namespace(
+                config=str(config_path),
+                repo=tmpdir,
+                tool=None,
+                json=False,
+                no_color=True,
+                fail_fast=False,
+                timeout=10,
+                verbose=False,
+            )
+            exit_code = fieldboard.run_command(args)
+            self.assertEqual(exit_code, 2)
+
+    def test_run_command_uses_default_config(self):
+        """Test run command uses default config when no config file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                config=None,
+                repo=tmpdir,
+                tool=None,
+                json=False,
+                no_color=True,
+                fail_fast=False,
+                timeout=10,
+                verbose=False,
+            )
+            # Should use default config (which has tools that aren't on PATH)
+            exit_code = fieldboard.run_command(args)
+            # All tools will be skipped since they're not on PATH
+            self.assertEqual(exit_code, 0)
+
+    def test_run_command_with_timeout_override(self):
+        """Test run command with timeout override."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool_path = Path(tmpdir) / "tool.py"
+            tool_path.write_text("#!/usr/bin/env python\nprint('ok')\n")
+
+            config = {
+                "repo": tmpdir,
+                "timeout_seconds": 10,
+                "tools": [
+                    {
+                        "name": "tool1",
+                        "command": "python",
+                        "args": [str(tool_path)],
+                        "enabled": True,
+                    }
+                ],
+            }
+            config_path = Path(tmpdir) / "fieldboard.json"
+            config_path.write_text(json.dumps(config))
+
+            args = argparse.Namespace(
+                config=str(config_path),
+                repo=tmpdir,
+                tool=None,
+                json=False,
+                no_color=True,
+                fail_fast=False,
+                timeout=30,
+                verbose=False,
+            )
+            exit_code = fieldboard.run_command(args)
+            self.assertEqual(exit_code, 0)
+
+    def test_run_command_all_skipped(self):
+        """Test run command when all tools are skipped."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "repo": tmpdir,
+                "timeout_seconds": 10,
+                "tools": [
+                    {
+                        "name": "missing",
+                        "command": "nonexistent_tool",
+                        "args": [],
+                        "enabled": True,
+                    }
+                ],
+            }
+            config_path = Path(tmpdir) / "fieldboard.json"
+            config_path.write_text(json.dumps(config))
+
+            args = argparse.Namespace(
+                config=str(config_path),
+                repo=tmpdir,
+                tool=None,
+                json=False,
+                no_color=True,
+                fail_fast=False,
+                timeout=10,
+                verbose=False,
+            )
+            exit_code = fieldboard.run_command(args)
+            self.assertEqual(exit_code, 0)
+
 
 class TestInitCommand(unittest.TestCase):
     """Test init command."""
@@ -481,6 +828,156 @@ class TestInitCommand(unittest.TestCase):
                 self.assertIn("test", config)
             finally:
                 os.chdir(original_dir)
+
+    def test_init_overwrite_with_yes(self):
+        """Test that init overwrites when user says yes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                # Create existing config
+                with open("fieldboard.json", "w") as f:
+                    json.dump({"test": True}, f)
+
+                args = argparse.Namespace(config=None)
+                with patch("builtins.input", return_value="y"):
+                    fieldboard.init_command(args)
+
+                # Config should be overwritten with default
+                with open("fieldboard.json") as f:
+                    config = json.load(f)
+                self.assertIn("tools", config)
+                self.assertNotIn("test", config)
+            finally:
+                os.chdir(original_dir)
+
+    def test_init_custom_config_path(self):
+        """Test init with custom config path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                custom_path = "custom_board.json"
+                args = argparse.Namespace(config=custom_path)
+                fieldboard.init_command(args)
+                self.assertTrue(os.path.exists(custom_path))
+            finally:
+                os.chdir(original_dir)
+
+
+class TestMain(unittest.TestCase):
+    """Test main function."""
+
+    def test_main_run_command(self):
+        """Test main with run command."""
+        with patch("argparse.ArgumentParser.parse_args") as mock_args:
+            mock_args.return_value = argparse.Namespace(
+                command="run",
+                config=None,
+                repo=None,
+                tool=None,
+                json=False,
+                no_color=True,
+                fail_fast=False,
+                timeout=None,
+                verbose=False,
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                fieldboard.main()
+            # Should exit with code from run_command
+            self.assertIn(ctx.exception.code, [0, 1, 2])
+
+    def test_main_init_command(self):
+        """Test main with init command."""
+        with patch("argparse.ArgumentParser.parse_args") as mock_args:
+            mock_args.return_value = argparse.Namespace(
+                command="init",
+                config=None,
+            )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                original_dir = os.getcwd()
+                try:
+                    os.chdir(tmpdir)
+                    with self.assertRaises(SystemExit) as ctx:
+                        fieldboard.main()
+                    self.assertEqual(ctx.exception.code, 0)
+                finally:
+                    os.chdir(original_dir)
+
+    def test_main_no_command(self):
+        """Test main with no command prints help."""
+        with patch("argparse.ArgumentParser.parse_args") as mock_args:
+            mock_args.return_value = argparse.Namespace(
+                command=None,
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                fieldboard.main()
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_main_version_flag(self):
+        """Test main with --version flag."""
+        with self.assertRaises(SystemExit) as ctx:
+            with patch("sys.argv", ["fieldboard", "--version"]):
+                fieldboard.main()
+            self.assertEqual(ctx.exception.code, 0)
+
+
+class TestEdgeCases(unittest.TestCase):
+    """Test edge cases."""
+
+    def test_run_tool_with_no_args(self):
+        """Test run tool with no args."""
+        tool = {
+            "name": "test",
+            "command": "python",
+            "args": [],
+            "enabled": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = fieldboard.run_tool(tool, tmpdir, 10)
+            self.assertEqual(result["status"], "pass")
+
+    def test_run_tool_with_multiple_args(self):
+        """Test run tool with multiple args."""
+        tool = {
+            "name": "test",
+            "command": "python",
+            "args": ["-c", "import sys; print(sys.argv[1])", "arg1"],
+            "enabled": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = fieldboard.run_tool(tool, tmpdir, 10)
+            self.assertIn("arg1", result["output"])
+
+    def test_format_terminal_long_tool_name(self):
+        """Test terminal formatting with long tool name."""
+        results = [
+            {
+                "name": "very-long-tool-name-that-is-long",
+                "status": "pass",
+                "duration_ms": 100,
+                "output": "",
+                "error": "",
+            },
+        ]
+        output = fieldboard.format_terminal(results, "/repo", no_color=True)
+        self.assertIn("very-long-tool-name-that-is-long", output)
+
+    def test_format_terminal_multiline_error(self):
+        """Test terminal formatting with multiline error."""
+        results = [
+            {
+                "name": "tool1",
+                "status": "fail",
+                "duration_ms": 100,
+                "output": "",
+                "error": "line1\nline2\nline3",
+            },
+        ]
+        output = fieldboard.format_terminal(results, "/repo", no_color=True)
+        self.assertIn("line1", output)
+        # Should only show first line
+        self.assertNotIn("line2", output)
 
 
 if __name__ == "__main__":
