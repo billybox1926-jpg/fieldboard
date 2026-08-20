@@ -3,12 +3,16 @@
 
 Runs multiple quality tools as subprocesses, captures results, and displays
 a clean terminal dashboard or JSON report.
+
+SECURITY: This tool executes commands defined in fieldboard.json. Only run it
+with configuration files you trust. See README.md for details.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -17,9 +21,59 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 DEFAULT_TIMEOUT = 120
+
+# Command names must be alphanumeric with hyphens/underscores/dots/slashes
+# (for paths). This rejects shell metacharacters like ; | & $ ` etc.
+SAFE_COMMAND_PATTERN = re.compile(r"^[A-Za-z0-9._\-/\\:]+$")
+
+# Whitelist of known BillyBox tools for --safe mode
+SAFE_TOOL_WHITELIST = frozenset(
+    {
+        "mdguard",
+        "graft",
+        "policy-runner",
+        "dep-health-scanner",
+        "config-drift",
+        "ctxpack",
+        "mockroute",
+        "commitlog",
+        "ruff",
+        "pytest",
+        "mypy",
+        "black",
+        "flake8",
+        "python",
+        "python3",
+        "npm",
+        "node",
+        "cargo",
+        "go",
+    }
+)
+
+
+def validate_command(command: str) -> bool:
+    """Validate that a command name contains no shell metacharacters."""
+    return bool(SAFE_COMMAND_PATTERN.match(command))
+
+
+def validate_repo_path(repo: str) -> tuple[bool, str]:
+    """Validate and resolve a repo path.
+
+    Returns (is_valid, resolved_path_or_error).
+    """
+    try:
+        path = Path(repo).resolve(strict=True)
+    except (OSError, RuntimeError) as e:
+        return False, f"cannot resolve path: {e}"
+
+    if not path.is_dir():
+        return False, "not a directory"
+
+    return True, str(path)
 
 
 def tool_available(command: str) -> bool:
@@ -90,6 +144,7 @@ def run_tool(
     repo: str,
     timeout: int,
     verbose: bool = False,
+    safe_mode: bool = False,
 ) -> dict[str, Any]:
     """Run a single tool and return results."""
     name = tool["name"]
@@ -105,6 +160,30 @@ def run_tool(
             "error": "disabled in config",
         }
 
+    # Security: validate command has no shell metacharacters
+    if not validate_command(command):
+        return {
+            "name": name,
+            "status": "skipped",
+            "exit_code": None,
+            "duration_ms": 0,
+            "output": "",
+            "error": f"rejected: unsafe characters in command '{command}'",
+        }
+
+    # Security: in safe mode, only allow whitelisted tools
+    if safe_mode:
+        base_command = Path(command).name
+        if base_command not in SAFE_TOOL_WHITELIST:
+            return {
+                "name": name,
+                "status": "skipped",
+                "exit_code": None,
+                "duration_ms": 0,
+                "output": "",
+                "error": f"rejected in --safe mode: '{base_command}' not whitelisted",
+            }
+
     if not tool_available(command):
         return {
             "name": name,
@@ -119,12 +198,14 @@ def run_tool(
     start = time.monotonic()
 
     try:
+        # shell=False is the default and is required for security
         result = subprocess.run(
             cmd_args,
             cwd=repo,
             capture_output=True,
             text=True,
             timeout=timeout,
+            shell=False,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         expected = tool.get("expected_exit_codes", [0])
@@ -256,10 +337,14 @@ def run_command(args: argparse.Namespace) -> int:
 
     repo = args.repo or config.get("repo", ".")
     timeout = args.timeout or config.get("timeout_seconds", DEFAULT_TIMEOUT)
+    safe_mode = getattr(args, "safe", False)
 
-    if not Path(repo).is_dir():
-        print(f"Error: {repo} is not a directory", file=sys.stderr)
+    # Security: validate and resolve the repo path
+    is_valid, resolved = validate_repo_path(repo)
+    if not is_valid:
+        print(f"Error: {repo} — {resolved}", file=sys.stderr)
         return 2
+    repo = resolved
 
     # Get tools list
     tools = config.get("tools", [])
@@ -275,7 +360,7 @@ def run_command(args: argparse.Namespace) -> int:
     # Run tools
     results = []
     for tool in tools:
-        result = run_tool(tool, repo, timeout, args.verbose)
+        result = run_tool(tool, repo, timeout, args.verbose, safe_mode)
         results.append(result)
 
         # Fail fast
@@ -353,6 +438,11 @@ def main() -> None:
         "--fail-fast",
         action="store_true",
         help="stop after first failing tool",
+    )
+    run_parser.add_argument(
+        "--safe",
+        action="store_true",
+        help="only run whitelisted tools (recommended for untrusted configs)",
     )
     run_parser.add_argument(
         "--timeout",

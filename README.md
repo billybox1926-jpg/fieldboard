@@ -43,8 +43,8 @@ python fieldboard.py run --json
 
 ```
 python fieldboard.py run [--config PATH] [--repo PATH] [--tool NAME]
-                          [--json] [--no-color] [--fail-fast] [--timeout SEC]
-                          [--verbose]
+                          [--json] [--no-color] [--fail-fast] [--safe]
+                          [--timeout SEC] [--verbose]
 
 python fieldboard.py init [--config PATH]
 ```
@@ -115,6 +115,46 @@ FIELD BOARD — /home/user/myproject
   "tools": [...],
   "exit_code": 1
 }
+```
+
+## Security Considerations
+
+> [!WARNING]
+> **fieldboard executes commands defined in `fieldboard.json`.** A malicious
+> config file can run arbitrary programs on your machine. Only run fieldboard
+> against configuration files you trust.
+
+### What fieldboard does to protect you
+
+| Protection | Detail |
+|------------|--------|
+| **No shell** | All subprocesses run with `shell=False`. Arguments are passed as a list, never interpolated into a shell string. |
+| **Command validation** | The `command` field is validated against `^[A-Za-z0-9._\-/\\:]+$`. Any command containing `;`, `\|`, `&`, `` ` ``, `$`, `>`, or spaces is rejected and reported as skipped. |
+| **Path resolution** | `--repo` is resolved with `Path.resolve(strict=True)` and must be an existing directory. |
+| **Timeouts** | Every tool has a per-run timeout (default 120s) so a hung process can't block your pipeline. |
+| **Zero dependencies** | Standard library only — no supply-chain surface. |
+
+### `--safe` mode
+
+When running against a config you did not write yourself, use `--safe`:
+
+```bash
+python fieldboard.py run --safe
+```
+
+In safe mode only whitelisted tool binaries are executed (`ruff`, `pytest`,
+`mypy`, `mdguard`, `graft`, `policy-runner`, `dep-health-scanner`,
+`config-drift`, `ctxpack`, `mockroute`, `commitlog`, `python`, `node`, `npm`,
+`cargo`, `go`, ...). Everything else is skipped with a clear reason.
+
+### Reviewing an untrusted config
+
+```bash
+# Inspect before running
+cat fieldboard.json
+
+# Then run in safe mode
+python fieldboard.py run --safe --json
 ```
 
 ## Exit Codes
