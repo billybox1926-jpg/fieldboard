@@ -1,0 +1,36 @@
+{
+  "repo": ".",
+  "timeout_seconds": 120,
+  "tools": [
+    {
+      "name": "mdguard",
+      "command": "mdguard",
+      "args": ["check", "."],
+      "enabled": true
+    },
+    {
+      "name": "graft",
+      "command": "graft",
+      "args": ["scan", "--json"],
+      "enabled": true
+    },
+    {
+      "name": "policy-runner",
+      "command": "policy-runner",
+      "args": ["run"],
+      "enabled": true
+    },
+    {
+      "name": "dep-health-scanner",
+      "command": "dep-health-scanner",
+      "args": ["scan", "--json"],
+      "enabled": true
+    },
+    {
+      "name": "config-drift",
+      "command": "config-drift",
+      "args": ["diff", "--configs-root", "./configs"],
+      "enabled": false
+    }
+  ]
+}
